@@ -1,10 +1,12 @@
-package main
+package services
 
 import (
 	"encoding/json"
 	"log"
 	"net/http"
 	"time"
+
+	"go-notifications-worker/internal/config"
 )
 
 // HealthStatus represents the health check response structure
@@ -20,13 +22,13 @@ type HealthStatus struct {
 	TotalErrors             int64  `json:"total_errors"`
 }
 
-// startHealthCheckServer starts the HTTP server for health checks
-func startHealthCheckServer(metrics *Metrics) {
+// StartHealthCheckServer starts the HTTP server for health checks
+func StartHealthCheckServer(metrics *Metrics) {
 	go func() {
-		http.HandleFunc("/health", healthCheckHandler(metrics))
-		http.HandleFunc("/healthz", healthCheckHandler(metrics)) // Alternative endpoint for k8s
+		http.HandleFunc("/health", HealthCheckHandler(metrics))
+		http.HandleFunc("/healthz", HealthCheckHandler(metrics)) // Alternative endpoint for k8s
 
-		addr := ":" + healthCheckPort
+		addr := ":" + config.HealthCheckPort
 		log.Printf("Health check server starting on %s\n", addr)
 
 		if err := http.ListenAndServe(addr, nil); err != nil {
@@ -35,8 +37,8 @@ func startHealthCheckServer(metrics *Metrics) {
 	}()
 }
 
-// healthCheckHandler returns an HTTP handler for health checks
-func healthCheckHandler(metrics *Metrics) http.HandlerFunc {
+// HealthCheckHandler returns an HTTP handler for health checks
+func HealthCheckHandler(metrics *Metrics) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uptime := time.Since(metrics.StartTime)
 
@@ -47,7 +49,7 @@ func healthCheckHandler(metrics *Metrics) http.HandlerFunc {
 
 		health := HealthStatus{
 			Status:                  "healthy",
-			WorkerID:                workerId,
+			WorkerID:                config.WorkerId,
 			Uptime:                  uptime.String(),
 			TotalProcessed:          metrics.HighPriorityProcessed.Load() + metrics.NormalPriorityProcessed.Load(),
 			HighPriorityProcessed:   metrics.HighPriorityProcessed.Load(),

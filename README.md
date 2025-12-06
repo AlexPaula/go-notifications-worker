@@ -86,13 +86,13 @@ Press Windows + R keys together, then type `SQLServerManager16.msc` and press En
 To run the notification worker:
 
 ```bash
-go run worker.go health.go
+go run cmd/worker/main.go
 ```
 
 To build an executable:
 
 ```bash
-go build -o notifications-worker.exe worker.go health.go
+go build -o notifications-worker.exe ./cmd/worker
 ```
 
 Then run:
