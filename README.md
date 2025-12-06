@@ -11,6 +11,7 @@ Go (Golang) background service to send notifications.
 - **Concurrent processing** with configurable worker pools
 - **Graceful shutdown** handling
 - **Metrics tracking** and periodic reporting
+- **Health check endpoint** for monitoring and orchestration
 
 ## Setup
 
@@ -62,6 +63,8 @@ Then edit `.env` with your actual values:
 
 - **`FIREBASE_CREDENTIALS_FILE`**: Path to Firebase Admin SDK JSON file (default: `firebase-adminsdk.json`)
 
+- **`HEALTH_CHECK_PORT`**: Port for the health check HTTP server (default: 8080)
+
 - **`CLAIM_BATCH_HIGH`**: Batch size for high-priority notifications (default: 200)
 - **`CLAIM_BATCH_NORMAL`**: Batch size for normal-priority notifications (default: 500)
 - **`HIGH_PRIORITY_WORKER_POOL_SIZE`**: Number of concurrent workers for high-priority (default: 200)
@@ -83,13 +86,13 @@ Press Windows + R keys together, then type `SQLServerManager16.msc` and press En
 To run the notification worker:
 
 ```bash
-go run worker.go
+go run worker.go health.go
 ```
 
 To build an executable:
 
 ```bash
-go build -o notifications-worker.exe worker.go
+go build -o notifications-worker.exe worker.go health.go
 ```
 
 Then run:
@@ -140,6 +143,82 @@ The worker logs metrics every 30 seconds, including:
 - Average processing time
 - Throughput (notifications per second)
 
+## Health Check Endpoint
+
+The worker exposes an HTTP health check endpoint for monitoring and orchestration purposes. This is particularly useful for:
+- **Container orchestration** (Kubernetes, Docker Swarm) liveness and readiness probes
+- **Load balancers** to verify instance health
+- **Monitoring systems** to track worker status and metrics
+- **CI/CD pipelines** to verify deployment success
+
+### Available Endpoints
+
+- **`GET /health`** - Returns health status and metrics
+- **`GET /healthz`** - Alternative endpoint (Kubernetes convention)
+
+### Usage
+
+Check the worker's health status:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Response Format
+
+```json
+{
+  "status": "healthy",
+  "worker_id": "da44bc49-8c89-40a4-bc10-f1686357ad1f-36716",
+  "uptime": "1h23m45s",
+  "total_processed": 15234,
+  "high_priority_processed": 8500,
+  "normal_priority_processed": 6734,
+  "emails_sent": 12000,
+  "push_sent": 3234,
+  "total_errors": 45
+}
+```
+
+### Response Fields
+
+- **`status`**: Current health status (always "healthy" when responding)
+- **`worker_id`**: Unique identifier for this worker instance
+- **`uptime`**: How long the worker has been running
+- **`total_processed`**: Total number of notifications processed
+- **`high_priority_processed`**: Number of high-priority notifications processed
+- **`normal_priority_processed`**: Number of normal-priority notifications processed
+- **`emails_sent`**: Number of emails successfully sent
+- **`push_sent`**: Number of push notifications successfully sent
+- **`total_errors`**: Total number of errors encountered
+
+### Kubernetes Example
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: notifications-worker
+spec:
+  containers:
+  - name: worker
+    image: notifications-worker:latest
+    ports:
+    - containerPort: 8080
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 5
+```
+
 ## Security
 
 **Important:** Never commit sensitive credentials to version control!
@@ -148,18 +227,6 @@ The worker logs metrics every 30 seconds, including:
 - The `.env.example` file is committed and serves as a template
 - The `firebase-adminsdk.json` file is gitignored
 - All sensitive configuration is loaded from environment variables
-
-## TODO
-
-- Implement notification retries with exponential backoff (add NextAttemptAt column)
-- Implement Firebase backoff strategy for rate limiting
-- Re-analyze and optimize metrics
-- Organize code into separate files/packages
-- Implement structured logging (e.g., with zerolog or zap)
-- Add unit tests
-- Add integration tests
-- Add Docker support
-- Add health check endpoint
 
 ## License
 

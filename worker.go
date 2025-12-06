@@ -83,6 +83,7 @@ var (
 	smtpHost                     string
 	smtpPort                     string
 	firebaseCredentialsFile      string
+	healthCheckPort              string
 )
 
 // workerId unique for this process
@@ -121,6 +122,8 @@ func getEnvInt(key string, defaultValue int) int {
 
 // loadConfig loads all configuration from environment variables
 func loadConfig() {
+	healthCheckPort = getEnv("HEALTH_CHECK_PORT", "8080")
+
 	sqlConnString = getEnv("DB_CONNECTION_STRING", "")
 	if sqlConnString == "" {
 		log.Fatal("DB_CONNECTION_STRING environment variable is required")
@@ -234,6 +237,9 @@ func main() {
 
 	// Start metrics logger (logs every 30 seconds)
 	go logMetricsPeriodically(ctx, metrics, 30*time.Second)
+
+	// Start health check server
+	go startHealthCheckServer(metrics)
 
 	// Connect SQL Server
 	db, err := sql.Open("sqlserver", sqlConnString)
