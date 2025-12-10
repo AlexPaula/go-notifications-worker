@@ -51,26 +51,39 @@ Then edit `.env` with your actual values:
 
 #### Required Configuration
 
+**Database Configuration:**
 - **`DB_CONNECTION_STRING`**: SQL Server connection string
   ```
   DB_CONNECTION_STRING=Data Source=YOUR_SERVER;database=YOUR_DATABASE;Integrated Security=True;Persist Security Info=False;TrustServerCertificate=True;
   ```
 
+**Email Configuration (SMTP):**
 - **`SMTP_FROM`**: Email address to send from
 - **`SMTP_PASSWORD`**: SMTP password
 - **`SMTP_HOST`**: SMTP server hostname
 - **`SMTP_PORT`**: SMTP server port (default: 25)
 
+**Firebase Configuration:**
 - **`FIREBASE_CREDENTIALS_FILE`**: Path to Firebase Admin SDK JSON file (default: `firebase-adminsdk.json`)
 
+**Health Check Configuration:**
 - **`HEALTH_CHECK_PORT`**: Port for the health check HTTP server (default: 8080)
 
+**Worker Pool Configuration:**
 - **`CLAIM_BATCH_HIGH`**: Batch size for high-priority notifications (default: 200)
 - **`CLAIM_BATCH_NORMAL`**: Batch size for normal-priority notifications (default: 500)
 - **`HIGH_PRIORITY_WORKER_POOL_SIZE`**: Number of concurrent workers for high-priority (default: 200)
 - **`NORMAL_PRIORITY_WORKER_POOL_SIZE`**: Number of concurrent workers for normal-priority (default: 200)
+
+**Rate Limiting Configuration:**
 - **`HIGH_PRIORITY_RATE_LIMIT`**: Rate limit for high-priority notifications per second (default: 700)
 - **`NORMAL_PRIORITY_RATE_LIMIT`**: Rate limit for normal-priority notifications per second (default: 300)
+
+**Retry and Recovery Configuration:**
+- **`REAPER_INTERVAL_SECONDS`**: Interval in seconds for the reaper loop to reclaim stuck notifications (default: 15)
+- **`RECLAIM_BACKOFF_SECONDS`**: Seconds to wait before allowing a stuck notification to be reclaimed (default: 60)
+- **`RETRY_HIGH_BACKOFF_SECONDS`**: Initial backoff in seconds for high-priority notification retries (default: 15)
+- **`RETRY_NORMAL_BACKOFF_SECONDS`**: Initial backoff in seconds for normal-priority notification retries (default: 30)
 
 ### SQL Server Configuration
 
@@ -125,11 +138,14 @@ CREATE TABLE NotificationJournal (
     RetryCount TINYINT DEFAULT 0,
     MaxRetries TINYINT DEFAULT 5,
     CreatedAt DATETIME2 DEFAULT GETUTCDATE(),
-    UpdatedAt DATETIME2 DEFAULT GETUTCDATE()
+    UpdatedAt DATETIME2 DEFAULT GETUTCDATE(),
+    NextAttemptAt DATETIME2 NULL
 );
 
-CREATE INDEX IX_NotificationJournal_Status_Priority 
-ON NotificationJournal(Status, Priority, CreatedAt);
+CREATE INDEX IX_NotificationJournal_GetPending
+ON NotificationJournal(Status, Priority, CreatedAt, NextAttemptAt)
+INCLUDE (Type, [To], Subject, Body, RetryCount, MaxRetries)
+WHERE Status = 'pending'
 ```
 
 ## Metrics

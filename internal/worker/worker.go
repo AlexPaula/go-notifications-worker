@@ -33,7 +33,7 @@ func FetchNotifications(db *sql.DB, limit int, priority int) ([]models.Notificat
 	query := `
         SELECT TOP (@p1) Id, Type, Priority, [To], Subject, Body, RetryCount, MaxRetries
         FROM NotificationJournal WITH (ROWLOCK, READPAST, UPDLOCK)
-        WHERE Status = 'pending' AND Priority = @p2
+        WHERE Status = 'pending' AND Priority = @p2 AND (NextAttemptAt IS NULL OR NextAttemptAt <= GETUTCDATE())
         ORDER BY CreatedAt
     `
 
@@ -69,7 +69,7 @@ func FetchNotifications(db *sql.DB, limit int, priority int) ([]models.Notificat
 		}
 
 		updateQuery := fmt.Sprintf(`UPDATE NotificationJournal 
-			SET Status='processing', UpdatedAt=GETDATE() 
+			SET Status='processing', UpdatedAt=GETUTCDATE() 
 			WHERE Id IN (%s)`, idList)
 
 		_, err = tx.Exec(updateQuery)
@@ -87,8 +87,65 @@ func FetchNotifications(db *sql.DB, limit int, priority int) ([]models.Notificat
 }
 
 func SetStatus(db *sql.DB, id int64, status string) {
-	_, _ = db.Exec(`UPDATE NotificationJournal SET Status=@p1, UpdatedAt=GETDATE() WHERE Id=@p2`,
+	_, err := db.Exec(`
+		UPDATE NotificationJournal 
+		SET Status=@p1, 
+			UpdatedAt=GETUTCDATE() 
+		WHERE Id=@p2 
+			AND (Status = 'processing' OR @p1 = 'sent')`,
 		status, id)
+
+	log.Printf("set status err id=%d: %v", id, err)
+}
+
+// reaperLoop periodically finds expired leases and recovers them (blocked on state 'processing')
+func ReaperLoop(ctx context.Context, db *sql.DB) {
+	t := time.NewTicker(time.Duration(config.ReaperIntervalSeconds) * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := ReapExpired(ctx, db); err != nil {
+				log.Printf("reaper error: %v", err)
+			}
+		}
+	}
+}
+
+// reapExpired resets rows to be processed again
+func ReapExpired(ctx context.Context, db *sql.DB) error {
+	res, err := db.ExecContext(ctx, `
+		UPDATE NotificationJournal
+		SET Status = 'pending',
+			UpdatedAt = GETUTCDATE()
+		WHERE Status = 'processing'
+			AND UpdatedAt >= DATEADD(SECOND, @backoff, UpdatedAt)
+	`, sql.Named("backoff", config.ReclaimBackoffSeconds))
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		log.Printf("reaper: reset %d (to pending)\n", n)
+	}
+
+	return nil
+}
+
+func ScheduleRetry(db *sql.DB, id int64, backoffSec int) {
+	_, err := db.Exec(`
+		UPDATE NotificationJournal 
+		SET Status = 'pending', 
+			RetryCount = RetryCount + 1,
+			NextAttemptAt = DATEADD(SECOND, @p1, GETUTCDATE()),
+			UpdatedAt=GETUTCDATE() 
+			WHERE Id=@p2 
+				AND Status = 'processing'`,
+		backoffSec, id)
+
+	log.Printf("schedule retry err id=%d: %v", id, err)
 }
 
 // ================================================================
@@ -146,7 +203,21 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 
 			if err != nil {
 				log.Printf("ERROR sending %d: %v\n", n.Id, err)
-				SetStatus(db, n.Id, "error")
+
+				if n.RetryCount+1 >= n.MaxRetries {
+					SetStatus(db, n.Id, "error")
+				} else {
+					// schedule retry with exponential backoff (simple)
+					retryBackoffSec := config.RetryNormalBackoffSeconds
+					if n.Priority == 1 {
+						retryBackoffSec = config.RetryHighBackoffSeconds
+					}
+					backoffSec := int(retryBackoffSec * (1 << n.RetryCount)) // 30s,60s,120s,...
+					if backoffSec > 3600 {
+						backoffSec = 3600
+					}
+					ScheduleRetry(db, n.Id, backoffSec)
+				}
 			} else {
 				SetStatus(db, n.Id, "sent")
 			}

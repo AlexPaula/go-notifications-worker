@@ -19,6 +19,10 @@ const (
 	DefaultNormalPriorityWorkerPoolSize = 200
 	DefaultHighPriorityRateLimit        = 700
 	DefaultNormalPriorityRateLimit      = 300
+	DefaultReaperIntervalSeconds        = 15
+	DefaultReclaimBackoffSeconds        = 60
+	DefaultRetryHighBackoffSeconds      = 15
+	DefaultRetryNormalBackoffSeconds    = 30
 )
 
 // Configuration loaded from environment
@@ -36,6 +40,10 @@ var (
 	SmtpPort                     string
 	FirebaseCredentialsFile      string
 	HealthCheckPort              string
+	ReaperIntervalSeconds        int
+	ReclaimBackoffSeconds        int
+	RetryHighBackoffSeconds      int
+	RetryNormalBackoffSeconds    int
 )
 
 // WorkerId unique for this process
@@ -102,6 +110,11 @@ func LoadConfig() {
 	NormalPriorityWorkerPoolSize = GetEnvInt("NORMAL_PRIORITY_WORKER_POOL_SIZE", DefaultNormalPriorityWorkerPoolSize)
 	HighPriorityRateLimit = GetEnvInt("HIGH_PRIORITY_RATE_LIMIT", DefaultHighPriorityRateLimit)
 	NormalPriorityRateLimit = GetEnvInt("NORMAL_PRIORITY_RATE_LIMIT", DefaultNormalPriorityRateLimit)
+
+	ReaperIntervalSeconds = GetEnvInt("REAPER_INTERVAL_SECONDS", DefaultReaperIntervalSeconds)
+	ReclaimBackoffSeconds = GetEnvInt("RECLAIM_BACKOFF_SECONDS", DefaultReclaimBackoffSeconds)
+	RetryHighBackoffSeconds = GetEnvInt("RETRY_HIGH_BACKOFF_SECONDS", DefaultRetryHighBackoffSeconds)
+	RetryNormalBackoffSeconds = GetEnvInt("RETRY_NORMAL_BACKOFF_SECONDS_", DefaultRetryNormalBackoffSeconds)
 
 	log.Println("Configuration loaded successfully")
 }

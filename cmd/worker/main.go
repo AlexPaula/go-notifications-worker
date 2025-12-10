@@ -63,6 +63,9 @@ func main() {
 		go worker.Worker(ctx, &wg, normalCh, db, fcmClient, limiterNormal, metrics, 2) // 2 = normal priority
 	}
 
+	// Start reaper
+	go worker.ReaperLoop(ctx, db)
+
 	log.Println("Worker started...")
 
 	// Main loop polls DB every second
@@ -104,6 +107,7 @@ func main() {
 				metrics.DatabaseErrors.Add(1)
 			}
 
+			// Sleep if doing nothing
 			if len(high) == 0 && len(normal) == 0 {
 				time.Sleep(1 * time.Second)
 			}
