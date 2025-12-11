@@ -26,8 +26,10 @@ type Metrics struct {
 	RateLimitWaitsNormal atomic.Int64
 
 	// Timing
-	TotalProcessingTimeMs atomic.Int64
-	StartTime             time.Time
+	TotalProcessingTimeMs      atomic.Int64
+	TotalEmailProcessingTimeMs atomic.Int64
+	TotalPushProcessingTimeMs  atomic.Int64
+	StartTime                  time.Time
 }
 
 // NewMetrics creates a new Metrics instance
@@ -79,6 +81,16 @@ func LogMetrics(m *Metrics) {
 		avgProcessingTime = float64(m.TotalProcessingTimeMs.Load()) / float64(totalProcessed)
 	}
 
+	avgEmailProcessingTime := float64(0)
+	if emailsSent+emailErrors > 0 {
+		avgEmailProcessingTime = float64(m.TotalEmailProcessingTimeMs.Load()) / float64(emailsSent+emailErrors)
+	}
+
+	avgPushProcessingTime := float64(0)
+	if pushSent+pushErrors > 0 {
+		avgPushProcessingTime = float64(m.TotalPushProcessingTimeMs.Load()) / float64(pushSent+pushErrors)
+	}
+
 	throughput := float64(0)
 	if uptimeSeconds > 0 {
 		throughput = float64(totalProcessed) / uptimeSeconds
@@ -101,6 +113,8 @@ func LogMetrics(m *Metrics) {
 	log.Printf("  - High Priority Waits: %d", rateLimitWaitsHigh)
 	log.Printf("  - Normal Priority Waits: %d", rateLimitWaitsNormal)
 	log.Printf("Performance:")
-	log.Printf("  - Avg Processing Time: %.2f ms", avgProcessingTime)
+	log.Printf("  - Avg Processing Time (Overall): %.2f ms", avgProcessingTime)
+	log.Printf("  - Avg Email Processing Time: %.2f ms", avgEmailProcessingTime)
+	log.Printf("  - Avg Push Processing Time: %.2f ms", avgPushProcessingTime)
 	log.Println("====================================")
 }

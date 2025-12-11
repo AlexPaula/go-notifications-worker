@@ -95,7 +95,9 @@ func SetStatus(db *sql.DB, id int64, status string) {
 			AND (Status = 'processing' OR @p1 = 'sent')`,
 		status, id)
 
-	log.Printf("set status err id=%d: %v", id, err)
+	if err != nil {
+		log.Printf("set status err id=%d: %v", id, err)
+	}
 }
 
 // reaperLoop periodically finds expired leases and recovers them (blocked on state 'processing')
@@ -121,7 +123,7 @@ func ReapExpired(ctx context.Context, db *sql.DB) error {
 		SET Status = 'pending',
 			UpdatedAt = GETUTCDATE()
 		WHERE Status = 'processing'
-			AND UpdatedAt >= DATEADD(SECOND, @backoff, UpdatedAt)
+			AND UpdatedAt <= DATEADD(SECOND, -@backoff, GETUTCDATE())
 	`, sql.Named("backoff", config.ReclaimBackoffSeconds))
 	if err != nil {
 		return err
@@ -184,20 +186,31 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 			}
 
 			var err error
+			var sendStartTime time.Time
 			switch strings.ToLower(n.Type) {
 			case "email":
+				sendStartTime = time.Now()
 				err = SendEmail(n.To, "", "", n.Subject.String, n.Body.String)
+				sendDuration := time.Since(sendStartTime).Milliseconds()
+				metrics.TotalEmailProcessingTimeMs.Add(sendDuration)
 				if err != nil {
 					metrics.EmailErrors.Add(1)
+					log.Printf("Email FAILED - ID: %d, To: %s, Duration: %dms, Error: %v\n", n.Id, n.To, sendDuration, err)
 				} else {
 					metrics.EmailsSent.Add(1)
+					log.Printf("Email SENT - ID: %d, To: %s, Duration: %dms\n", n.Id, n.To, sendDuration)
 				}
 			case "push":
+				sendStartTime = time.Now()
 				err = SendPush(ctx, fcm, n.To, n.Body.String)
+				sendDuration := time.Since(sendStartTime).Milliseconds()
+				metrics.TotalPushProcessingTimeMs.Add(sendDuration)
 				if err != nil {
 					metrics.PushErrors.Add(1)
+					log.Printf("Push FAILED - ID: %d, Token: %s, Duration: %dms, Error: %v\n", n.Id, n.To, sendDuration, err)
 				} else {
 					metrics.PushSent.Add(1)
+					log.Printf("Push SENT - ID: %d, Token: %s, Duration: %dms\n", n.Id, n.To, sendDuration)
 				}
 			}
 
