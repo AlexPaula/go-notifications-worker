@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"go-notifications-worker/internal/config"
+	"go-notifications-worker/internal/constants"
 	"go-notifications-worker/internal/models"
 	"go-notifications-worker/internal/services"
 )
@@ -92,7 +93,7 @@ func SetStatus(db *sql.DB, id int64, status string) {
 		SET Status=@p1, 
 			UpdatedAt=GETUTCDATE() 
 		WHERE Id=@p2 
-			AND (Status = 'processing' OR @p1 = 'sent')`,
+			AND Status != 'sent'`,
 		status, id)
 
 	if err != nil {
@@ -144,7 +145,7 @@ func ScheduleRetry(db *sql.DB, id int64, backoffSec int) {
 			NextAttemptAt = DATEADD(SECOND, @p1, GETUTCDATE()),
 			UpdatedAt=GETUTCDATE() 
 			WHERE Id=@p2 
-				AND Status = 'processing'`,
+				AND (Status = 'processing' OR Status = 'pending')`,
 		backoffSec, id)
 
 	log.Printf("schedule retry err id=%d: %v", id, err)
@@ -179,7 +180,7 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 			}
 
 			// Track rate limit waits
-			if priority == 1 {
+			if priority == constants.PriorityHigh {
 				metrics.RateLimitWaitsHigh.Add(1)
 			} else {
 				metrics.RateLimitWaitsNormal.Add(1)
@@ -188,7 +189,7 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 			var err error
 			var sendStartTime time.Time
 			switch strings.ToLower(n.Type) {
-			case "email":
+			case constants.NotificationTypeEmail:
 				sendStartTime = time.Now()
 				err = SendEmail(n.To, "", "", n.Subject.String, n.Body.String)
 				sendDuration := time.Since(sendStartTime).Milliseconds()
@@ -200,7 +201,7 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 					metrics.EmailsSent.Add(1)
 					log.Printf("Email SENT - ID: %d, To: %s, Duration: %dms\n", n.Id, n.To, sendDuration)
 				}
-			case "push":
+			case constants.NotificationTypePush:
 				sendStartTime = time.Now()
 				err = SendPush(ctx, fcm, n.To, n.Body.String)
 				sendDuration := time.Since(sendStartTime).Milliseconds()
@@ -217,22 +218,37 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 			if err != nil {
 				log.Printf("ERROR sending %d: %v\n", n.Id, err)
 
-				if n.RetryCount+1 >= n.MaxRetries {
-					SetStatus(db, n.Id, "error")
-				} else {
-					// schedule retry with exponential backoff (simple)
+				// Check if error is retryable (for both email and push)
+				isRetryable := strings.Contains(err.Error(), constants.FCMError_Retry) ||
+					(strings.ToLower(n.Type) == constants.NotificationTypeEmail) // Emails are generally retryable
+
+				if isRetryable && n.RetryCount+1 < n.MaxRetries {
+					// Schedule retry with exponential backoff for transient errors
 					retryBackoffSec := config.RetryNormalBackoffSeconds
-					if n.Priority == 1 {
+					if n.Priority == constants.PriorityHigh {
 						retryBackoffSec = config.RetryHighBackoffSeconds
 					}
 					backoffSec := int(retryBackoffSec * (1 << n.RetryCount)) // 30s,60s,120s,...
 					if backoffSec > 3600 {
 						backoffSec = 3600
 					}
+
 					ScheduleRetry(db, n.Id, backoffSec)
+					log.Printf("Scheduled retry for notification %d (transient error)\n", n.Id)
+
+				} else if strings.Contains(err.Error(), constants.FCMError_InvalidToken) ||
+					strings.Contains(err.Error(), constants.FCMError_InvalidArgument) {
+
+					SetStatus(db, n.Id, constants.NotificationStateError)
+					log.Printf("Non-retryable error for notification %d - marking as failed\n", n.Id)
+
+				} else if !isRetryable || n.RetryCount+1 >= n.MaxRetries {
+					// Max retries exceeded or non-retryable
+					SetStatus(db, n.Id, constants.NotificationStateError)
+					log.Printf("Max retries exceeded or non-retryable error for notification %d\n", n.Id)
 				}
 			} else {
-				SetStatus(db, n.Id, "sent")
+				SetStatus(db, n.Id, constants.NotificationStateSent)
 			}
 
 			// Track processing metrics
@@ -249,7 +265,7 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 }
 
 // ================================================================
-// Email Sending (MailKit-like via SMTP)
+// Email Sending (via SMTP)
 // ================================================================
 
 func SendEmail(to, cc, bcc, subject, body string) error {
@@ -288,5 +304,21 @@ func SendPush(ctx context.Context, client *messaging.Client, token, body string)
 		},
 	}
 	_, err := client.Send(ctx, message)
+
+	if err != nil {
+		// Check if error is retryable
+		if messaging.IsRegistrationTokenNotRegistered(err) {
+			return fmt.Errorf("%s: %w", constants.FCMError_InvalidToken, err)
+		} else if messaging.IsInvalidArgument(err) {
+			return fmt.Errorf("%s: %w", constants.FCMError_InvalidArgument, err)
+		}
+		if messaging.IsUnknown(err) ||
+			messaging.IsMessageRateExceeded(err) ||
+			messaging.IsInternal(err) ||
+			messaging.IsServerUnavailable(err) {
+			return fmt.Errorf("%s: %w", constants.FCMError_Retry, err)
+		}
+	}
+
 	return err
 }

@@ -17,6 +17,7 @@ import (
 	"go-notifications-worker/internal/models"
 	"go-notifications-worker/internal/services"
 	"go-notifications-worker/internal/worker"
+	"go-notifications-worker/internal/constants"
 )
 
 func main() {
@@ -54,13 +55,13 @@ func main() {
 	// Start workers for HIGH priority
 	for i := 0; i < config.HighPriorityWorkerPoolSize; i++ {
 		wg.Add(1)
-		go worker.Worker(ctx, &wg, highCh, db, fcmClient, limiterHigh, metrics, 1) // 1 = high priority
+		go worker.Worker(ctx, &wg, highCh, db, fcmClient, limiterHigh, metrics, constants.PriorityHigh) // 1 = high priority
 	}
 
 	// Start workers for NORMAL priority
 	for i := 0; i < config.NormalPriorityWorkerPoolSize; i++ {
 		wg.Add(1)
-		go worker.Worker(ctx, &wg, normalCh, db, fcmClient, limiterNormal, metrics, 2) // 2 = normal priority
+		go worker.Worker(ctx, &wg, normalCh, db, fcmClient, limiterNormal, metrics, constants.PriorityNormal) // 2 = normal priority
 	}
 
 	// Start reaper
