@@ -38,6 +38,7 @@ var (
 	SmtpPassword                 string
 	SmtpHost                     string
 	SmtpPort                     string
+	SmtpPoolSize                 int
 	FirebaseCredentialsFile      string
 	HealthCheckPort              string
 	ReaperIntervalSeconds        int
@@ -95,6 +96,7 @@ func LoadConfig() {
 	SmtpPassword = GetEnv("SMTP_PASSWORD", "")
 	SmtpHost = GetEnv("SMTP_HOST", "")
 	SmtpPort = GetEnv("SMTP_PORT", "25")
+	SmtpPoolSize = GetEnvInt("SMTP_POOL_SIZE", 5)
 
 	if SmtpFrom == "" || SmtpPassword == "" || SmtpHost == "" {
 		log.Println("Warning: Email configuration incomplete. Email sending may fail.")

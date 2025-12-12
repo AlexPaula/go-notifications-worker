@@ -15,7 +15,7 @@ func InitFirebase(ctx context.Context) *messaging.Client {
 	// Connect Firebase
 	app, err := firebase.NewApp(ctx, nil, option.WithCredentialsFile(config.FirebaseCredentialsFile))
 	if err != nil {
-		log.Fatal("FIREBASE ERR:", err)
+		log.Fatal("Firebase ERR:", err)
 	}
 	fcmClient, err := app.Messaging(ctx)
 	if err != nil {

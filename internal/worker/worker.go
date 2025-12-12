@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"net/smtp"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"go-notifications-worker/internal/config"
+	"go-notifications-worker/internal/connections"
 	"go-notifications-worker/internal/constants"
 	"go-notifications-worker/internal/models"
 	"go-notifications-worker/internal/services"
@@ -95,6 +96,21 @@ func SetStatus(db *sql.DB, id int64, status string) {
 		WHERE Id=@p2 
 			AND Status != 'sent'`,
 		status, id)
+
+	if err != nil {
+		log.Printf("set status err id=%d: %v", id, err)
+	}
+}
+
+func SetErrorStatusAndAdd1RetryCount(db *sql.DB, id int64) {
+	_, err := db.Exec(`
+		UPDATE NotificationJournal 
+		SET Status=@p1, 
+			RetryCount = RetryCount + 1,
+			UpdatedAt=GETUTCDATE() 
+		WHERE Id=@p2 
+			AND Status != 'sent'`,
+		constants.NotificationStateError, id)
 
 	if err != nil {
 		log.Printf("set status err id=%d: %v", id, err)
@@ -191,7 +207,9 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 			switch strings.ToLower(n.Type) {
 			case constants.NotificationTypeEmail:
 				sendStartTime = time.Now()
-				err = SendEmail(n.To, "", "", n.Subject.String, n.Body.String)
+				// Detect if body contains HTML tags
+				isHtml := strings.Contains(n.Body.String, "<") && strings.Contains(n.Body.String, ">")
+				err = SendEmail(ctx, n.To, "", "", n.Subject.String, n.Body.String, isHtml)
 				sendDuration := time.Since(sendStartTime).Milliseconds()
 				metrics.TotalEmailProcessingTimeMs.Add(sendDuration)
 				if err != nil {
@@ -244,8 +262,8 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 
 				} else if !isRetryable || n.RetryCount+1 >= n.MaxRetries {
 					// Max retries exceeded or non-retryable
-					SetStatus(db, n.Id, constants.NotificationStateError)
-					log.Printf("Max retries exceeded or non-retryable error for notification %d\n", n.Id)
+					SetErrorStatusAndAdd1RetryCount(db, n.Id)
+					log.Printf("Max retries exceeded or non-retryable error for notification %d (retryCount=%d, maxRetries=%d)\n", n.Id, n.RetryCount, n.MaxRetries)
 				}
 			} else {
 				SetStatus(db, n.Id, constants.NotificationStateSent)
@@ -268,26 +286,127 @@ func Worker(ctx context.Context, wg *sync.WaitGroup, ch <-chan models.Notificati
 // Email Sending (via SMTP)
 // ================================================================
 
-func SendEmail(to, cc, bcc, subject, body string) error {
-	auth := smtp.PlainAuth("", config.SmtpFrom, config.SmtpPassword, config.SmtpHost)
+// stripHTMLTags removes HTML tags from a string, returning plain text
+func stripHTMLTags(html string) string {
+	// Remove script and style elements
+	re := regexp.MustCompile(`(?s)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>`)
+	text := re.ReplaceAllString(html, "")
 
+	// Remove all HTML tags
+	re = regexp.MustCompile(`<[^>]*>`)
+	text = re.ReplaceAllString(text, "")
+
+	// Decode HTML entities and collapse whitespace
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimSpace(text)
+
+	return text
+}
+
+func SendEmail(ctx context.Context, to, cc, bcc, subject, body string, isBodyHtml bool) error {
+	// Get connection with context timeout (fails fast if no connections available)
+	client, err := connections.GetSMTPConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get SMTP connection: %w", err)
+	}
+
+	isHealthy := true
+	defer func() {
+		connections.ReturnSMTPConnection(client, isHealthy)
+	}()
+
+	// Build message headers (CC visible, BCC NOT included)
 	msg := "From: " + config.SmtpFrom + "\r\n" +
-		"To: " + to + "\r\n" +
-		"Cc: " + cc + "\r\n" +
-		"Bcc: " + bcc + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"Content-Type: text/html; charset=UTF-8\r\n" +
-		"\r\n" +
-		body + "\r\n"
+		"To: " + to + "\r\n"
 
-	err := smtp.SendMail(
-		config.SmtpHost+":"+config.SmtpPort,
-		auth,
-		config.SmtpFrom,
-		[]string{to},
-		[]byte(msg),
-	)
+	if cc != "" {
+		msg += "Cc: " + cc + "\r\n"
+	}
+	// NOTE: Do NOT add Bcc to headers - it's hidden!
 
+	msg += "Subject: " + subject + "\r\n"
+
+	// Build message body based on content type
+	if isBodyHtml {
+		// Use MIME multipart for HTML email with plain text fallback
+		boundary := "===============" + fmt.Sprintf("%d", time.Now().UnixNano()) + "==============="
+		msg += "MIME-Version: 1.0\r\n" +
+			"Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n" +
+			"\r\n" +
+			"--" + boundary + "\r\n" +
+			"Content-Type: text/plain; charset=UTF-8\r\n" +
+			"Content-Transfer-Encoding: 7bit\r\n" +
+			"\r\n" +
+			stripHTMLTags(body) + "\r\n" +
+			"--" + boundary + "\r\n" +
+			"Content-Type: text/html; charset=UTF-8\r\n" +
+			"Content-Transfer-Encoding: 7bit\r\n" +
+			"\r\n" +
+			body + "\r\n" +
+			"--" + boundary + "--\r\n"
+	} else {
+		// Simple plain text email
+		msg += "Content-Type: text/plain; charset=UTF-8\r\n" +
+			"Content-Transfer-Encoding: 7bit\r\n" +
+			"\r\n" +
+			body + "\r\n"
+	}
+
+	// Build SMTP recipients list (includes To, Cc, AND Bcc)
+	recipients := []string{to}
+	if cc != "" {
+		recipients = append(recipients, strings.Split(cc, ",")...)
+	}
+	if bcc != "" {
+		recipients = append(recipients, strings.Split(bcc, ",")...)
+	}
+
+	// Clean up whitespace in recipient emails
+	for i := range recipients {
+		recipients[i] = strings.TrimSpace(recipients[i])
+	}
+
+	// Send mail
+
+	/*
+	   The SMTP sequence is:
+
+	   Mail()  - Tell the server who the email is FROM
+	   Rcpt()  - Tell the server who to send TO (called once per recipient)
+	   Data()  - Send the actual message content (Opens a write channel to send the message content)
+	   Write() - Writes the actual email message (headers + body) to that channel
+
+	   So the Rcpt() loop tells the server all the addresses that should receive this email (To + Cc + Bcc),
+	   and then Data() sends the actual message body. The server handles delivering to all those recipients.
+	*/
+
+	if err := client.Mail(config.SmtpFrom); err != nil {
+		isHealthy = false
+		return err
+	}
+
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			isHealthy = false
+			return err
+		}
+	}
+
+	wc, err := client.Data()
+	if err != nil {
+		isHealthy = false
+		return err
+	}
+	defer wc.Close()
+
+	_, err = wc.Write([]byte(msg))
+	if err != nil {
+		isHealthy = false
+	}
 	return err
 }
 

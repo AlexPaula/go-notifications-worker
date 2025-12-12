@@ -62,6 +62,7 @@ Then edit `.env` with your actual values:
 - **`SMTP_PASSWORD`**: SMTP password
 - **`SMTP_HOST`**: SMTP server hostname
 - **`SMTP_PORT`**: SMTP server port (default: 25)
+- **`SMTP_POOL_SIZE`**: SMTP connection pool size (default: 5)
 
 **Firebase Configuration:**
 - **`FIREBASE_CREDENTIALS_FILE`**: Path to Firebase Admin SDK JSON file (default: `firebase-adminsdk.json`)

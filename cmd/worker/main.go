@@ -14,10 +14,10 @@ import (
 
 	"go-notifications-worker/internal/config"
 	"go-notifications-worker/internal/connections"
+	"go-notifications-worker/internal/constants"
 	"go-notifications-worker/internal/models"
 	"go-notifications-worker/internal/services"
 	"go-notifications-worker/internal/worker"
-	"go-notifications-worker/internal/constants"
 )
 
 func main() {
@@ -32,18 +32,23 @@ func main() {
 	limiterHigh := rate.NewLimiter(rate.Limit(config.HighPriorityRateLimit), config.HighPriorityRateLimit)       // 70% for high priority
 	limiterNormal := rate.NewLimiter(rate.Limit(config.NormalPriorityRateLimit), config.NormalPriorityRateLimit) // 30% for normal priority
 
-	// Start metrics logger (logs every 30 seconds)
-	go services.LogMetricsPeriodically(ctx, metrics, 30*time.Second)
-
-	// Start health check server
-	go services.StartHealthCheckServer(metrics)
-
 	// Connect to Db
 	db := connections.InitDB(ctx)
 	defer db.Close()
 
 	// Connect to Firebase
 	fcmClient := connections.InitFirebase(ctx)
+
+	// Connect to SMTP
+	if err := connections.InitSMTP(); err != nil {
+		log.Fatal("Failed to initialize SMTP pool:", err)
+	}
+
+	// Start metrics logger (logs every 30 seconds)
+	go services.LogMetricsPeriodically(ctx, metrics, 30*time.Second)
+
+	// Start health check server
+	go services.StartHealthCheckServer(metrics)
 
 	log.Println("worker started, id=", config.WorkerId)
 
@@ -74,6 +79,7 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutting down...")
+			connections.ClosePool()
 			close(highCh)
 			close(normalCh)
 			wg.Wait()
