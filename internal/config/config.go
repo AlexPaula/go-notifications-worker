@@ -23,11 +23,22 @@ const (
 	DefaultReclaimBackoffSeconds        = 60
 	DefaultRetryHighBackoffSeconds      = 15
 	DefaultRetryNormalBackoffSeconds    = 30
+	DefaultPushBatchTimeout             = 50  // milliseconds
+	DefaultPushBatchSize                = 100 // max messages per batch
+	DefaultPushBatchMaxSize             = 500 // Firebase FCM limit
+	DefaultDbMaxOpenConns               = 150
+	DefaultDbMaxIdleConns               = 20
+	DefaultDbConnMaxLifetimeMinutes     = 30
+	DefaultDbConnMaxIdleTimeMinutes     = 5
 )
 
 // Configuration loaded from environment
 var (
 	SqlConnString                string
+	DbMaxOpenConns               int
+	DbMaxIdleConns               int
+	DbConnMaxLifetimeMinutes     int
+	DbConnMaxIdleTimeMinutes     int
 	ClaimBatchHigh               int
 	ClaimBatchNormal             int
 	HighPriorityWorkerPoolSize   int
@@ -45,6 +56,9 @@ var (
 	ReclaimBackoffSeconds        int
 	RetryHighBackoffSeconds      int
 	RetryNormalBackoffSeconds    int
+	PushBatchTimeout             int
+	PushBatchSize                int
+	PushBatchMaxSize             int
 )
 
 // WorkerId unique for this process
@@ -91,6 +105,12 @@ func LoadConfig() {
 		log.Fatal("DB_CONNECTION_STRING environment variable is required")
 	}
 
+	// Database connection pool configuration
+	DbMaxOpenConns = GetEnvInt("DB_MAX_OPEN_CONNS", DefaultDbMaxOpenConns)
+	DbMaxIdleConns = GetEnvInt("DB_MAX_IDLE_CONNS", DefaultDbMaxIdleConns)
+	DbConnMaxLifetimeMinutes = GetEnvInt("DB_CONN_MAX_LIFETIME_MINUTES", DefaultDbConnMaxLifetimeMinutes)
+	DbConnMaxIdleTimeMinutes = GetEnvInt("DB_CONN_MAX_IDLE_TIME_MINUTES", DefaultDbConnMaxIdleTimeMinutes)
+
 	// Email configuration
 	SmtpFrom = GetEnv("SMTP_FROM", "")
 	SmtpPassword = GetEnv("SMTP_PASSWORD", "")
@@ -116,7 +136,12 @@ func LoadConfig() {
 	ReaperIntervalSeconds = GetEnvInt("REAPER_INTERVAL_SECONDS", DefaultReaperIntervalSeconds)
 	ReclaimBackoffSeconds = GetEnvInt("RECLAIM_BACKOFF_SECONDS", DefaultReclaimBackoffSeconds)
 	RetryHighBackoffSeconds = GetEnvInt("RETRY_HIGH_BACKOFF_SECONDS", DefaultRetryHighBackoffSeconds)
-	RetryNormalBackoffSeconds = GetEnvInt("RETRY_NORMAL_BACKOFF_SECONDS_", DefaultRetryNormalBackoffSeconds)
+	RetryNormalBackoffSeconds = GetEnvInt("RETRY_NORMAL_BACKOFF_SECONDS", DefaultRetryNormalBackoffSeconds)
+
+	// Push batching configuration
+	PushBatchTimeout = GetEnvInt("PUSH_BATCH_TIMEOUT_MS", DefaultPushBatchTimeout)
+	PushBatchSize = GetEnvInt("PUSH_BATCH_SIZE", DefaultPushBatchSize)
+	PushBatchMaxSize = GetEnvInt("PUSH_BATCH_MAX_SIZE", DefaultPushBatchMaxSize)
 
 	log.Println("Configuration loaded successfully")
 }

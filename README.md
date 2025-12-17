@@ -54,8 +54,12 @@ Then edit `.env` with your actual values:
 **Database Configuration:**
 - **`DB_CONNECTION_STRING`**: SQL Server connection string
   ```
-  DB_CONNECTION_STRING=Data Source=YOUR_SERVER;database=YOUR_DATABASE;Integrated Security=True;Persist Security Info=False;TrustServerCertificate=True;
+  DB_CONNECTION_STRING=Data Source=YOUR_SERVER;database=YOUR_DATABASE;Integrated Security=True;Persist Security Info=False;TrustServerCertificate=True;Connection Timeout=30;App Name=go-notifications-worker;
   ```
+- **`DB_MAX_OPEN_CONNS`**: Maximum number of open connections to the database (default: 150)
+- **`DB_MAX_IDLE_CONNS`**: Maximum number of idle connections to keep open (default: 20)
+- **`DB_CONN_MAX_LIFETIME_MINUTES`**: Maximum time (in minutes) a connection can be reused (default: 30)
+- **`DB_CONN_MAX_IDLE_TIME_MINUTES`**: Maximum time (in minutes) a connection can remain idle (default: 5)
 
 **Email Configuration (SMTP):**
 - **`SMTP_FROM`**: Email address to send from
@@ -66,6 +70,9 @@ Then edit `.env` with your actual values:
 
 **Firebase Configuration:**
 - **`FIREBASE_CREDENTIALS_FILE`**: Path to Firebase Admin SDK JSON file (default: `firebase-adminsdk.json`)
+- **`PUSH_BATCH_TIMEOUT_MS`**: Maximum time in milliseconds to wait before sending a batch of push notifications (default: 50)
+- **`PUSH_BATCH_SIZE`**: Target batch size for push notifications (default: 100)
+- **`PUSH_BATCH_MAX_SIZE`**: Firebase Cloud Messaging maximum batch size for push notifications (500). **Don't change it**.
 
 **Health Check Configuration:**
 - **`HEALTH_CHECK_PORT`**: Port for the health check HTTP server (default: 8080)

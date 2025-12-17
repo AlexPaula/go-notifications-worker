@@ -13,8 +13,8 @@ import (
 	"golang.org/x/time/rate"
 
 	"go-notifications-worker/internal/config"
-	"go-notifications-worker/internal/connections"
 	"go-notifications-worker/internal/constants"
+	"go-notifications-worker/internal/integrations"
 	"go-notifications-worker/internal/models"
 	"go-notifications-worker/internal/services"
 	"go-notifications-worker/internal/worker"
@@ -33,14 +33,14 @@ func main() {
 	limiterNormal := rate.NewLimiter(rate.Limit(config.NormalPriorityRateLimit), config.NormalPriorityRateLimit) // 30% for normal priority
 
 	// Connect to Db
-	db := connections.InitDB(ctx)
+	db := integrations.InitDB(ctx)
 	defer db.Close()
 
 	// Connect to Firebase
-	fcmClient := connections.InitFirebase(ctx)
+	_, fcmClient := integrations.InitFirebase(ctx)
 
 	// Connect to SMTP
-	if err := connections.InitSMTP(); err != nil {
+	if err := integrations.InitSMTP(ctx); err != nil {
 		log.Fatal("Failed to initialize SMTP pool:", err)
 	}
 
@@ -60,13 +60,13 @@ func main() {
 	// Start workers for HIGH priority
 	for i := 0; i < config.HighPriorityWorkerPoolSize; i++ {
 		wg.Add(1)
-		go worker.Worker(ctx, &wg, highCh, db, fcmClient, limiterHigh, metrics, constants.PriorityHigh) // 1 = high priority
+		go worker.SendNotifications(ctx, &wg, highCh, db, fcmClient, limiterHigh, metrics, constants.PriorityHigh) // 1 = high priority
 	}
 
 	// Start workers for NORMAL priority
 	for i := 0; i < config.NormalPriorityWorkerPoolSize; i++ {
 		wg.Add(1)
-		go worker.Worker(ctx, &wg, normalCh, db, fcmClient, limiterNormal, metrics, constants.PriorityNormal) // 2 = normal priority
+		go worker.SendNotifications(ctx, &wg, normalCh, db, fcmClient, limiterNormal, metrics, constants.PriorityNormal) // 2 = normal priority
 	}
 
 	// Start reaper
@@ -79,35 +79,72 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutting down...")
-			connections.ClosePool()
+
+			// Close channels first to signal workers
 			close(highCh)
 			close(normalCh)
+
+			// Wait for all workers to finish processing
+			log.Println("Waiting for workers to complete...")
 			wg.Wait()
-			log.Println("Shut down")
+			log.Println("All workers completed")
+
+			// Close SMTP pool after workers are done
+			integrations.SMTPClosePool()
+
+			// Give DB a moment to flush any pending operations
+			// db.Close() via defer will handle the rest gracefully
+			time.Sleep(100 * time.Millisecond)
+
+			log.Println("Shut down complete")
 			return
 
 		default:
 			// Fetch batches
-			high, err := worker.FetchNotifications(db, config.ClaimBatchHigh, 1)
+			high, err := integrations.DbFetchNotifications(ctx, db, config.ClaimBatchHigh, 1)
 			if err == nil {
 				if len(high) > 0 {
 					log.Printf("Fetched %d HIGH priority notifications\n", len(high))
 				}
 				for _, n := range high {
-					highCh <- n
+					// Non-blocking send with backpressure handling
+					select {
+					case highCh <- n:
+						// Successfully queued
+					case <-ctx.Done():
+						// Shutdown in progress - notification stays 'processing', reaper will reclaim it
+						log.Printf("Shutdown: leaving notification %d for reaper\n", n.Id)
+						return
+					default:
+						// Channel full, reschedule immediately to avoid blocking
+						integrations.DbScheduleRetry(ctx, db, n.Id, 0)
+						log.Printf("HIGH priority channel full, rescheduled notification %d\n", n.Id)
+					}
 				}
 			} else {
 				log.Printf("Error fetching HIGH priority: %v\n", err)
 				metrics.DatabaseErrors.Add(1)
 			}
 
-			normal, err := worker.FetchNotifications(db, config.ClaimBatchNormal, 2)
+			normal, err := integrations.DbFetchNotifications(ctx, db, config.ClaimBatchNormal, 2)
 			if err == nil {
 				if len(normal) > 0 {
 					log.Printf("Fetched %d NORMAL priority notifications\n", len(normal))
 				}
 				for _, n := range normal {
-					normalCh <- n
+					// Non-blocking send with backpressure handling
+					select {
+					case normalCh <- n:
+						// Successfully queued
+					case <-ctx.Done():
+						// Shutdown in progress - notification stays 'processing', reaper will reclaim it
+						log.Printf("Shutdown: leaving notification %d for reaper\n", n.Id)
+						return
+					default:
+						// Channel full, reschedule immediately to avoid blocking
+						integrations.DbScheduleRetry(ctx, db, n.Id, 0)
+						log.Printf("NORMAL priority channel full, rescheduled notification %d\n", n.Id)
+					}
 				}
 			} else {
 				log.Printf("Error fetching NORMAL priority: %v\n", err)
