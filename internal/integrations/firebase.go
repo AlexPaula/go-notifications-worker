@@ -3,9 +3,7 @@ package integrations
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -179,6 +177,24 @@ func (pb *PushBatcher) sendBatch(messages []models.PushMessage) {
 				Title: msg.Title,
 				Body:  msg.Body,
 			},
+			Android: &messaging.AndroidConfig{
+				Priority: func() string {
+					if msg.Priority == constants.PriorityHigh {
+						return "high"
+					}
+					return "normal"
+				}(),
+			},
+			APNS: &messaging.APNSConfig{
+				Headers: map[string]string{
+					"apns-priority": func() string {
+						if msg.Priority == constants.PriorityHigh {
+							return "10"
+						}
+						return "5"
+					}(),
+				},
+			},
 		}
 		fcmMessages = append(fcmMessages, fcmMsg)
 	}
@@ -230,19 +246,11 @@ func (pb *PushBatcher) handleFailedMessage(msg models.PushMessage, err error) {
 	log.Printf("Push FAILED (batch) - ID: %d, Token: %s, Error: %v\n", msg.NotificationId, msg.Token, err)
 
 	// Check if error is retryable
-	if messaging.IsRegistrationTokenNotRegistered(err) {
-		err = fmt.Errorf("%s: %w", constants.FCMError_InvalidToken, err)
-	} else if messaging.IsInvalidArgument(err) {
-		err = fmt.Errorf("%s: %w", constants.FCMError_InvalidArgument, err)
-	} else if messaging.IsUnknown(err) ||
-		messaging.IsMessageRateExceeded(err) ||
+	isRetryable := messaging.IsQuotaExceeded(err) ||
 		messaging.IsInternal(err) ||
-		messaging.IsServerUnavailable(err) {
-		err = fmt.Errorf("%s: %w", constants.FCMError_Retry, err)
-	}
-
-	// Check if error is retryable
-	isRetryable := strings.Contains(err.Error(), constants.FCMError_Retry)
+		messaging.IsUnavailable(err) ||
+		messaging.IsSenderIDMismatch(err) ||
+		messaging.IsThirdPartyAuthError(err)
 
 	if isRetryable && msg.RetryCount+1 < msg.MaxRetries {
 		// Schedule retry with exponential backoff
@@ -255,14 +263,8 @@ func (pb *PushBatcher) handleFailedMessage(msg models.PushMessage, err error) {
 		DbScheduleRetry(pb.ctx, pb.db, msg.NotificationId, backoffSec)
 		log.Printf("Scheduled retry for notification %d (transient error)\n", msg.NotificationId)
 
-	} else if strings.Contains(err.Error(), constants.FCMError_InvalidToken) ||
-		strings.Contains(err.Error(), constants.FCMError_InvalidArgument) {
-
+	} else {
 		DbSetErrorStatusAndAdd1RetryCount(pb.ctx, pb.db, msg.NotificationId)
-		log.Printf("Non-retryable error for notification %d - marking as failed\n", msg.NotificationId)
-
-	} else if !isRetryable || msg.RetryCount+1 >= msg.MaxRetries {
-		DbSetErrorStatusAndAdd1RetryCount(pb.ctx, pb.db, msg.NotificationId)
-		log.Printf("Max retries exceeded or non-retryable error for notification %d (retryCount=%d, maxRetries=%d)\n", msg.NotificationId, msg.RetryCount, msg.MaxRetries)
+		log.Printf("Non-retryable or max retries exceeded for notification %d (retryCount=%d, maxRetries=%d) - marking as error\n", msg.NotificationId, msg.RetryCount, msg.MaxRetries)
 	}
 }

@@ -11,8 +11,4 @@ const (
 	NotificationStateProcessing = "processing"
 	NotificationStateSent       = "sent"
 	NotificationStateError      = "error"
-
-	FCMError_InvalidToken    = "fcm-invalid-token"
-	FCMError_InvalidArgument = "fcm-invalid-argument"
-	FCMError_Retry           = "fcm-retry"
 )
