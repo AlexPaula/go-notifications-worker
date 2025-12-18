@@ -63,10 +63,22 @@ Then edit `.env` with your actual values:
 
 **Email Configuration (SMTP):**
 - **`SMTP_FROM`**: Email address to send from
-- **`SMTP_PASSWORD`**: SMTP password
+- **`SMTP_USERNAME`**: SMTP authentication username (optional - defaults to `SMTP_FROM` if not set)
+- **`SMTP_PASSWORD`**: SMTP password (optional - leave empty for relay mode without authentication)
 - **`SMTP_HOST`**: SMTP server hostname
-- **`SMTP_PORT`**: SMTP server port (default: 25)
+- **`SMTP_PORT`**: SMTP server port (default: 465)
+  - Use 465 for `SMTP_TLS_MODE=tls` (implicit TLS)
+  - Use 587 for `SMTP_TLS_MODE=starttls` (STARTTLS)
+  - Use 25 for `SMTP_TLS_MODE=none` (insecure, port 25 is unencrypted)
 - **`SMTP_POOL_SIZE`**: SMTP connection pool size (default: 5)
+- **`SMTP_TLS_MODE`**: TLS connection mode (default: `tls`)
+  - `tls` - Implicit TLS/SMTPS, encrypted from start (port 465, most secure)
+  - `starttls` - Start plain then upgrade to TLS (port 587)
+  - `none` - No encryption (insecure, port 25, local development only)
+
+**Note:** If `SMTP_PASSWORD` is empty, authentication will be skipped (relay mode). This is most common for:
+  - Local mail servers on port 25 (insecure)
+  - Enterprise relay servers with IP whitelisting or certificate-based auth (can use TLS/STARTTLS)
 
 **Firebase Configuration:**
 - **`FIREBASE_CREDENTIALS_FILE`**: Path to Firebase Admin SDK JSON file (default: `firebase-adminsdk.json`)

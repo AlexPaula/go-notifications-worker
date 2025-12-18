@@ -46,10 +46,12 @@ var (
 	HighPriorityRateLimit        int
 	NormalPriorityRateLimit      int
 	SmtpFrom                     string
+	SmtpUsername                 string
 	SmtpPassword                 string
 	SmtpHost                     string
 	SmtpPort                     string
 	SmtpPoolSize                 int
+	SmtpTLSMode                  string
 	FirebaseCredentialsFile      string
 	HealthCheckPort              string
 	ReaperIntervalSeconds        int
@@ -113,13 +115,29 @@ func LoadConfig() {
 
 	// Email configuration
 	SmtpFrom = GetEnv("SMTP_FROM", "")
+	SmtpUsername = GetEnv("SMTP_USERNAME", SmtpFrom) // Default to SMTP_FROM if not set
 	SmtpPassword = GetEnv("SMTP_PASSWORD", "")
 	SmtpHost = GetEnv("SMTP_HOST", "")
-	SmtpPort = GetEnv("SMTP_PORT", "25")
+	SmtpPort = GetEnv("SMTP_PORT", "465")
 	SmtpPoolSize = GetEnvInt("SMTP_POOL_SIZE", 5)
+	// TLS mode: "tls" (implicit TLS/SMTPS, port 465), "starttls" (upgrade, port 587), "none" (insecure, port 25)
+	SmtpTLSMode = GetEnv("SMTP_TLS_MODE", "tls")
 
-	if SmtpFrom == "" || SmtpPassword == "" || SmtpHost == "" {
+	if SmtpFrom == "" || SmtpHost == "" {
 		log.Println("Warning: Email configuration incomplete. Email sending may fail.")
+	}
+
+	if SmtpPassword == "" {
+		log.Println("Info: SMTP password not set, will attempt relay mode (no authentication)")
+	}
+
+	// Warn about common port/TLS mode mismatches
+	if SmtpTLSMode == "tls" && SmtpPort != "465" {
+		log.Printf("Warning: SMTP_TLS_MODE is 'tls' but port is %s (typically use 465 for implicit TLS)", SmtpPort)
+	} else if SmtpTLSMode == "starttls" && SmtpPort != "587" {
+		log.Printf("Warning: SMTP_TLS_MODE is 'starttls' but port is %s (typically use 587 for STARTTLS)", SmtpPort)
+	} else if SmtpTLSMode == "none" && (SmtpPort != "25" && SmtpPort != "2525") {
+		log.Printf("Warning: SMTP_TLS_MODE is 'none' but port is %s (typically use 25 or 2525 for plain SMTP)", SmtpPort)
 	}
 
 	// Firebase configuration

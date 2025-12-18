@@ -74,30 +74,82 @@ func SMTPCreateConnection(ctx context.Context) (*smtp.Client, error) {
 		return nil, err
 	}
 
-	client, err := smtp.Dial(config.SmtpHost + ":" + config.SmtpPort)
-	if err != nil {
-		return nil, err
+	var client *smtp.Client
+	var err error
+
+	// Configure TLS settings
+	tlsConfig := &tls.Config{
+		ServerName: config.SmtpHost,
+		MinVersion: tls.VersionTLS12, // Enforce minimum TLS 1.2
 	}
 
-	if err := client.StartTLS(&tls.Config{ServerName: config.SmtpHost}); err != nil {
-		client.Close()
-		return nil, err
+	// Connect based on TLS mode
+	switch config.SmtpTLSMode {
+	case "tls":
+		// Implicit TLS (SMTPS) - encrypted from the start (port 465 typically)
+		conn, err := tls.Dial("tcp", config.SmtpHost+":"+config.SmtpPort, tlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to establish TLS connection: %w", err)
+		}
+
+		client, err = smtp.NewClient(conn, config.SmtpHost)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to create SMTP client: %w", err)
+		}
+
+	case "starttls":
+		// STARTTLS - start plain then upgrade to TLS (port 587 typically)
+		client, err = smtp.Dial(config.SmtpHost + ":" + config.SmtpPort)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to SMTP server: %w", err)
+		}
+
+		if err := client.StartTLS(tlsConfig); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("failed to start TLS: %w", err)
+		}
+
+	case "none":
+		// No TLS - insecure, only for local development
+		log.Println("WARNING: SMTP TLS disabled - connection is insecure!")
+		client, err = smtp.Dial(config.SmtpHost + ":" + config.SmtpPort)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to SMTP server: %w", err)
+		}
+
+	default:
+		return nil, fmt.Errorf("invalid SMTP_TLS_MODE: %s (must be 'tls', 'starttls', or 'none')", config.SmtpTLSMode)
 	}
 
-	auth := smtp.PlainAuth("", config.SmtpFrom, config.SmtpPassword, config.SmtpHost)
-	if err := client.Auth(auth); err != nil {
-		client.Close()
-		return nil, err
+	// Authenticate (only if password is provided)
+	// For port 25 relay servers, authentication may not be required
+	if config.SmtpPassword != "" {
+		auth := smtp.PlainAuth("", config.SmtpUsername, config.SmtpPassword, config.SmtpHost)
+		if err := client.Auth(auth); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("SMTP authentication failed: %w", err)
+		}
+	} else {
+		if config.SmtpTLSMode == "none" {
+			log.Println("SMTP: No password provided, skipping authentication (insecure relay mode)")
+		} else {
+			log.Printf("SMTP: No password provided with %s mode - ensure server allows unauthenticated connections", config.SmtpTLSMode)
+		}
 	}
 
 	return client, nil
 }
 
-// SMTPGetConnection with timeout to prevent indefinite blocking
 func SMTPGetConnection(ctx context.Context) (*smtp.Client, error) {
-	// Try to get from pool with short timeout per attempt
-	for attempt := 0; attempt < 3; attempt++ {
-		// Use non-blocking select first to check if pool has connections
+	// Retry loop with total timeout
+	deadline := time.Now().Add(30 * time.Second)
+	attempt := 0
+
+	for time.Now().Before(deadline) {
+		attempt++
+
+		// Try to get a connection from the pool
 		select {
 		case wrapper := <-smtpPool:
 			if wrapper == nil {
@@ -108,54 +160,49 @@ func SMTPGetConnection(ctx context.Context) (*smtp.Client, error) {
 			if time.Since(wrapper.CreatedAt) > maxConnectionAge {
 				log.Printf("SMTP connection exceeded max age (%v), refreshing", maxConnectionAge)
 				wrapper.Client.Close()
-				// Create a fresh connection
+				sizeMutex.Lock()
+				currentPoolSize--
+				sizeMutex.Unlock()
+
+				// Create a fresh connection and return it
 				newClient, err := SMTPCreateConnection(ctx)
 				if err != nil {
-					log.Printf("Failed to recreate aged SMTP connection: %v", err)
-					continue // Try to get another connection from pool
+					log.Printf("Failed to recreate aged SMTP connection (attempt %d): %v", attempt, err)
+					go replenishPool(ctx)
+					time.Sleep(100 * time.Millisecond) // Brief pause before retry
+					continue
 				}
-				newWrapper := &SMTPConnectionWrapper{
-					Client:    newClient,
-					CreatedAt: time.Now(),
-				}
-				return newWrapper.Client, nil
+				sizeMutex.Lock()
+				currentPoolSize++
+				sizeMutex.Unlock()
+				return newClient, nil
 			}
 
 			// Verify connection is alive before returning
 			if err := wrapper.Client.Noop(); err != nil {
-				log.Printf("SMTP connection noop failed (attempt %d/3): %v", attempt+1, err)
+				log.Printf("SMTP connection noop failed (attempt %d): %v", attempt, err)
 				wrapper.Client.Close()
-				// Try to get another connection from pool
+				sizeMutex.Lock()
+				currentPoolSize--
+				sizeMutex.Unlock()
+				go replenishPool(ctx)
+				time.Sleep(100 * time.Millisecond) // Brief pause before retry
 				continue
 			}
+
 			return wrapper.Client, nil
 
-		default:
-			// Pool is empty, don't wait - create direct connection immediately
-			if attempt == 0 {
-				log.Printf("SMTP pool empty, creating direct connection")
-			}
-		}
+		case <-ctx.Done():
+			return nil, ctx.Err()
 
-		// Check if context is cancelled before creating connection
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		// Pool is empty or previous attempts failed, create a brand new direct connection
-		newClient, err := SMTPCreateConnection(ctx)
-		if err != nil {
-			log.Printf("Failed to create direct SMTP connection (attempt %d/3): %v", attempt+1, err)
-			// Brief backoff before retry
-			time.Sleep(time.Duration(100*(attempt+1)) * time.Millisecond)
+		case <-time.After(200 * time.Millisecond):
+			// No connection available right now, retry
+			// This prevents tight loop spinning
 			continue
 		}
-
-		log.Printf("Created direct SMTP connection (pool was empty or unavailable)")
-		return newClient, nil
 	}
 
-	return nil, fmt.Errorf("failed to get SMTP connection after 3 attempts")
+	return nil, fmt.Errorf("timeout waiting for SMTP connection after %d attempts in 30s", attempt)
 }
 
 func SMTPReturnConnection(ctx context.Context, client *smtp.Client, isHealthy bool) {
@@ -175,7 +222,6 @@ func SMTPReturnConnection(ctx context.Context, client *smtp.Client, isHealthy bo
 		case <-ctx.Done():
 			log.Println("SMTP pool shutdown in progress, skipping replenishment")
 		default:
-			// Trigger async replenishment - don't block the worker
 			go replenishPool(ctx)
 		}
 		return
@@ -187,15 +233,23 @@ func SMTPReturnConnection(ctx context.Context, client *smtp.Client, isHealthy bo
 		CreatedAt: time.Now(), // Reset age timer
 	}
 
-	// Non-blocking send to pool (discard if pool is full or shutdown in progress)
+	// Blocking send with timeout to ensure connection is returned
 	select {
 	case smtpPool <- wrapper:
+		// Successfully returned to pool
+	case <-time.After(5 * time.Second):
+		// This shouldn't happen unless pool is stuck
+		log.Println("SMTP pool return timeout after 5s, discarding connection")
+		wrapper.Client.Close()
+		sizeMutex.Lock()
+		currentPoolSize--
+		sizeMutex.Unlock()
 	case <-ctx.Done():
 		log.Println("SMTP pool shutdown in progress, closing returned connection")
 		wrapper.Client.Close()
-	default:
-		log.Println("SMTP pool full, discarding connection")
-		wrapper.Client.Close()
+		sizeMutex.Lock()
+		currentPoolSize--
+		sizeMutex.Unlock()
 	}
 }
 
@@ -249,7 +303,7 @@ func healthCheckLoop(ctx context.Context) {
 func validatePoolHealth(ctx context.Context) {
 	poolSize := len(smtpPool)
 
-	// Sample all connections from the pool (non-blocking) or at least half
+	// Sample connections from the pool
 	checkLimit := poolSize
 	if checkLimit > 10 {
 		checkLimit = 10
@@ -293,23 +347,31 @@ func validatePoolHealth(ctx context.Context) {
 					Client:    newClient,
 					CreatedAt: time.Now(),
 				}
-				// Put it back in the pool
+				// Put it back in the pool with timeout (blocking)
 				select {
 				case smtpPool <- newWrapper:
 					sizeMutex.Lock()
 					currentPoolSize++
 					sizeMutex.Unlock()
-				default:
-					log.Println("SMTP pool full during health check, discarding replacement")
+				case <-time.After(5 * time.Second):
+					log.Println("SMTP pool return timeout during health check, discarding replacement")
 					newWrapper.Client.Close()
+				case <-ctx.Done():
+					log.Println("SMTP health check: shutdown during return, closing connection")
+					newWrapper.Client.Close()
+					return
 				}
 			} else {
-				// Connection is good, return it to pool
+				// Connection is good, return it to pool with timeout
 				select {
 				case smtpPool <- wrapper:
-				default:
-					log.Println("SMTP pool full during health check, discarding connection")
+				case <-time.After(5 * time.Second):
+					log.Println("SMTP pool return timeout during health check, discarding connection")
 					wrapper.Client.Close()
+				case <-ctx.Done():
+					log.Println("SMTP health check: shutdown during return, closing connection")
+					wrapper.Client.Close()
+					return
 				}
 			}
 		default:
@@ -322,7 +384,6 @@ func validatePoolHealth(ctx context.Context) {
 	replenishPool(ctx)
 }
 
-// replenishPool asynchronously creates connections to reach target pool size
 func replenishPool(ctx context.Context) {
 	// Check if shutdown is in progress
 	select {
@@ -364,25 +425,36 @@ func replenishPool(ctx context.Context) {
 			CreatedAt: time.Now(),
 		}
 
-		// Non-blocking send to pool with shutdown check
+		// Blocking send to pool with timeout
 		select {
 		case smtpPool <- newWrapper:
 			sizeMutex.Lock()
 			currentPoolSize++
 			sizeMutex.Unlock()
 			log.Printf("SMTP pool replenishment: added connection (%d/%d)", i+1, needed)
+		case <-time.After(5 * time.Second):
+			// Pool stuck, discard
+			newWrapper.Client.Close()
+			log.Printf("SMTP pool replenishment: timeout during send, stopping at %d/%d", i, needed)
+			return
 		case <-ctx.Done():
 			// Shutdown started, close the connection we just created
 			newWrapper.Client.Close()
 			log.Printf("SMTP pool replenishment: shutdown during send, stopping at %d/%d", i, needed)
 			return
-		default:
-			// Pool is full, connection not needed
-			newWrapper.Client.Close()
-			log.Printf("SMTP pool replenishment: pool full, stopping early at %d/%d", i, needed)
-			return
 		}
 	}
+}
+
+// isValidEmail performs basic email validation
+func isValidEmail(email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	// Basic email validation regex
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
+	return emailRegex.MatchString(email)
 }
 
 // stripHTMLTags removes HTML tags from a string, returning plain text
@@ -456,18 +528,48 @@ func SendEmail(ctx context.Context, to, cc, bcc, subject, body string, isBodyHtm
 	}
 
 	// Build SMTP recipients list (includes To, Cc, AND Bcc)
-	recipients := []string{to}
-	if cc != "" {
-		recipients = append(recipients, strings.Split(cc, ",")...)
-	}
-	if bcc != "" {
-		recipients = append(recipients, strings.Split(bcc, ",")...)
+	recipients := []string{}
+
+	// Helper function to split by comma or semicolon
+	splitEmails := func(emails string) []string {
+		// Replace semicolons with commas for consistent splitting
+		emails = strings.ReplaceAll(emails, ";", ",")
+		return strings.Split(emails, ",")
 	}
 
-	// Clean up whitespace in recipient emails
-	for i := range recipients {
-		recipients[i] = strings.TrimSpace(recipients[i])
+	// Add To recipients
+	if to != "" {
+		recipients = append(recipients, splitEmails(to)...)
 	}
+
+	// Add Cc recipients
+	if cc != "" {
+		recipients = append(recipients, splitEmails(cc)...)
+	}
+
+	// Add Bcc recipients
+	if bcc != "" {
+		recipients = append(recipients, splitEmails(bcc)...)
+	}
+
+	// Clean up whitespace and validate emails
+	validRecipients := []string{}
+	for _, recipient := range recipients {
+		recipient = strings.TrimSpace(recipient)
+		if recipient != "" {
+			if isValidEmail(recipient) {
+				validRecipients = append(validRecipients, recipient)
+			} else {
+				log.Printf("Warning: Invalid email address skipped: %s", recipient)
+			}
+		}
+	}
+
+	if len(validRecipients) == 0 {
+		return fmt.Errorf("no valid recipient email addresses found")
+	}
+
+	recipients = validRecipients
 
 	// Send mail
 
