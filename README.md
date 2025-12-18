@@ -1,7 +1,6 @@
 # go-notifications-worker
 
 Go (Golang) background service to send notifications.
-- This is a **test** project and my first Go interaction. It needs a lot of improvements.
 
 ## Features
 
@@ -17,10 +16,11 @@ Go (Golang) background service to send notifications.
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.25 or higher
 - SQL Server database
 - Firebase Admin SDK credentials (for push notifications)
 - SMTP server access (for email notifications)
+- **`.env` file** with required configuration (see Configuration section)
 
 ### Installation
 
