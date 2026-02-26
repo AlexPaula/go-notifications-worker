@@ -4,6 +4,7 @@ Go (Golang) background service to send notifications.
 
 ## Features
 
+- **Multi-database support** — SQL Server and PostgreSQL, selected via environment variable
 - **High-priority and normal-priority queues** with separate rate limiting
 - **Email notifications** via SMTP
 - **Push notifications** via Firebase Cloud Messaging (FCM)
@@ -17,7 +18,7 @@ Go (Golang) background service to send notifications.
 ### Prerequisites
 
 - Go 1.25 or higher
-- SQL Server database
+- SQL Server **or** PostgreSQL database
 - Firebase Admin SDK credentials (for push notifications)
 - SMTP server access (for email notifications)
 - **`.env` file** with required configuration (see Configuration section)
@@ -52,10 +53,18 @@ Then edit `.env` with your actual values:
 #### Required Configuration
 
 **Database Configuration:**
-- **`DB_CONNECTION_STRING`**: SQL Server connection string
-  ```
-  DB_CONNECTION_STRING=Data Source=YOUR_SERVER;database=YOUR_DATABASE;Integrated Security=True;Persist Security Info=False;TrustServerCertificate=True;Connection Timeout=30;App Name=go-notifications-worker;
-  ```
+- **`DB_DRIVER`**: Database backend to use (default: `sqlserver`)
+  - `sqlserver` — Microsoft SQL Server (via `go-mssqldb`)
+  - `postgres` — PostgreSQL (via `pgx`)
+- **`DB_CONNECTION_STRING`**: Connection string for the selected driver
+  - SQL Server:
+    ```
+    DB_CONNECTION_STRING=Data Source=YOUR_SERVER;database=YOUR_DATABASE;Integrated Security=True;Persist Security Info=False;TrustServerCertificate=True;Connection Timeout=30;App Name=go-notifications-worker;
+    ```
+  - PostgreSQL:
+    ```
+    DB_CONNECTION_STRING=postgres://user:password@localhost:5432/dbname?sslmode=disable
+    ```
 - **`DB_MAX_OPEN_CONNS`**: Maximum number of open connections to the database (default: 150)
 - **`DB_MAX_IDLE_CONNS`**: Maximum number of idle connections to keep open (default: 20)
 - **`DB_CONN_MAX_LIFETIME_MINUTES`**: Maximum time (in minutes) a connection can be reused (default: 30)
@@ -114,6 +123,16 @@ View: https://stackoverflow.com/a/36482195
 **To open SQL Server Configuration Manager:**
 Press Windows + R keys together, then type `SQLServerManager16.msc` and press Enter.
 
+### PostgreSQL Configuration
+
+Set `DB_DRIVER=postgres` and provide a standard PostgreSQL DSN:
+
+```
+DB_CONNECTION_STRING=postgres://user:password@localhost:5432/dbname?sslmode=disable
+```
+
+For SSL/TLS connections use `sslmode=require` or `sslmode=verify-full`.
+
 ### Running the Application
 
 To run the notification worker:
@@ -144,7 +163,9 @@ The worker handles `SIGINT` (Ctrl+C) and `SIGTERM` signals gracefully:
 
 ## Database Schema
 
-The application expects a `NotificationJournal` table with the following structure:
+The application expects a `NotificationJournal` table. Choose the schema for your database engine.
+
+### SQL Server
 
 ```sql
 CREATE TABLE NotificationJournal (
@@ -165,7 +186,34 @@ CREATE TABLE NotificationJournal (
 CREATE INDEX IX_NotificationJournal_GetPending
 ON NotificationJournal(Status, Priority, CreatedAt, NextAttemptAt)
 INCLUDE (Type, [To], Subject, Body, RetryCount, MaxRetries)
-WHERE Status = 'pending'
+WHERE Status = 'pending';
+```
+
+### PostgreSQL
+
+```sql
+CREATE TABLE NotificationJournal (
+    Id BIGSERIAL PRIMARY KEY,
+    Type VARCHAR(5) NOT NULL, -- 'email' or 'push'
+    Priority SMALLINT NOT NULL, -- 1 = high, 2 = normal
+    "To" VARCHAR(500) NOT NULL,
+    Subject VARCHAR(500),
+    Body TEXT,
+    Status VARCHAR(10) NOT NULL, -- 'pending', 'processing', 'sent', 'error'
+    RetryCount SMALLINT DEFAULT 0,
+    MaxRetries SMALLINT DEFAULT 5,
+    CreatedAt TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    UpdatedAt TIMESTAMP DEFAULT (NOW() AT TIME ZONE 'UTC'),
+    NextAttemptAt TIMESTAMP NULL
+);
+
+-- Status is excluded from the key: the partial predicate already guarantees it.
+-- Leading on Priority matches the query filter (Priority = $2).
+-- PostgreSQL indexes NULLs by default, so NextAttemptAt IS NULL is also covered.
+CREATE INDEX IX_NotificationJournal_GetPending
+ON NotificationJournal(Priority, CreatedAt, NextAttemptAt)
+INCLUDE (Type, "To", Subject, Body, RetryCount, MaxRetries)
+WHERE Status = 'pending';
 ```
 
 ## Metrics

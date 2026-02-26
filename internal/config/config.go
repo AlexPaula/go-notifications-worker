@@ -34,7 +34,8 @@ const (
 
 // Configuration loaded from environment
 var (
-	SqlConnString                string
+	DBDriver                     string
+	DBConnString                 string
 	DbMaxOpenConns               int
 	DbMaxIdleConns               int
 	DbConnMaxLifetimeMinutes     int
@@ -102,8 +103,11 @@ func GetEnvInt(key string, defaultValue int) int {
 func LoadConfig() {
 	HealthCheckPort = GetEnv("HEALTH_CHECK_PORT", "8080")
 
-	SqlConnString = GetEnv("DB_CONNECTION_STRING", "")
-	if SqlConnString == "" {
+	// DB_DRIVER selects the database backend: "sqlserver" (default) or "postgres"
+	DBDriver = GetEnv("DB_DRIVER", "sqlserver")
+
+	DBConnString = GetEnv("DB_CONNECTION_STRING", "")
+	if DBConnString == "" {
 		log.Fatal("DB_CONNECTION_STRING environment variable is required")
 	}
 
