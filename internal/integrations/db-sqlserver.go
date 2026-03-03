@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 
 	"go-notifications-worker/internal/constants"
 	"go-notifications-worker/internal/models"
@@ -61,18 +62,14 @@ func (p *sqlServerProvider) fetchNotifications(ctx context.Context, db *sql.DB, 
 	rows.Close() //nolint:errcheck // intentional early close before update
 
 	if len(ids) > 0 {
-		idList := ""
+		placeholders := make([]string, len(ids))
+		args := make([]interface{}, len(ids))
 		for i, id := range ids {
-			if i > 0 {
-				idList += ","
-			}
-			idList += fmt.Sprintf("%d", id)
+			placeholders[i] = fmt.Sprintf("@p%d", i+1)
+			args[i] = id
 		}
-		updateQuery := fmt.Sprintf(`
-			UPDATE NotificationJournal
-			SET Status = 'processing', UpdatedAt = GETUTCDATE()
-			WHERE Id IN (%s)`, idList)
-		if _, err = tx.ExecContext(ctx, updateQuery); err != nil {
+		updateQuery := "UPDATE NotificationJournal SET Status = 'processing', UpdatedAt = GETUTCDATE() WHERE Id IN (" + strings.Join(placeholders, ",") + ")"
+		if _, err = tx.ExecContext(ctx, updateQuery, args...); err != nil {
 			return nil, err
 		}
 	}
